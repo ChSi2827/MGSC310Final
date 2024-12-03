@@ -1,0 +1,665 @@
+---
+title: "Final Project"
+author: "Charles Simons"
+subtitle: MGSC 310
+output:
+  html_document:
+    df_print: paged
+---
+
+```{r setup, include=FALSE}
+
+# Please leave this code chunk as is. It makes some slight formatting changes to alter the output to be more aesthetically pleasing. 
+
+library(knitr)
+
+# Change the number in set seed to your own favorite number
+set.seed(1818)
+options(width=70)
+options(scipen=99)
+
+
+# this sets text outputted in code chunks to small
+opts_chunk$set(tidy.opts=list(width.wrap=50),tidy=TRUE, size = "vsmall")  
+opts_chunk$set(message = FALSE,                                          
+               warning = FALSE,
+               # "caching" stores objects in code chunks and only rewrites if you change things
+               cache = FALSE,                               
+               # automatically downloads dependency files
+               autodep = TRUE,
+               # 
+               cache.comments = FALSE,
+               # 
+               collapse = TRUE,
+               # change fig.width and fig.height to change the code height and width by default
+               fig.width = 5.5,  
+               fig.height = 4.5,
+               fig.align='center')
+
+
+```
+
+
+
+
+```{r setup-2}
+
+# Always print this out before your assignment
+sessionInfo()
+getwd()
+
+```
+
+
+<!-- ### start answering your problem set here -->
+<!-- You may export your homework in either html or pdf, with the former usually being easier. 
+     To export or compile your Rmd file: click above on 'Knit' then 'Knit to HTML' -->
+<!-- Be sure to submit both your .Rmd file and the compiled .html or .pdf file for full credit -->
+
+
+```{r setup-3}
+
+# load all your libraries in this chunk 
+library('tidyverse')
+library('dbscan') 
+library(dplyr)
+library(ggplot2)
+library(cluster)
+# note, do not run install.packages() inside a code chunk. install them in the console outside of a code chunk. 
+
+```
+
+# Heading 1
+## Smaller heading
+### even smaller heading
+
+
+## Exploring dataset
+
+```{r}
+
+data <- read_csv("RealEstate_California.csv")
+
+head(data)
+
+summary(data)
+
+dataCleaned <- data %>% select(-country, -time, -state, -description, -currency, -livingAreaValue, -stateId)
+
+write_csv(dataCleaned, "dataCleaned.csv")
+
+head(dataCleaned)
+
+summary(dataCleaned)
+
+```
+
+
+```{r}
+
+ggplot(dataCleaned, aes(x = price)) + geom_density() + scale_x_continuous(limits = c(0, 10000000)) + labs(title = "Density Plot of Price", x = "Price", y = "Density") + theme_minimal()
+
+```
+
+
+```{r}
+
+ggplot(dataCleaned, aes(x = livingArea, y = price)) + geom_point(alpha = 0.1) + scale_x_continuous(limits = c(0, 10000)) + scale_y_continuous(limits = c(0, 10000000)) + labs(title = "Scatterplot of Living Area vs. Price", x = "Living Area", y = "Price") + theme_minimal() 
+
+```
+
+
+
+
+
+```{r}
+
+# Step 1: Data Preparation
+geoData <- dataCleaned %>%
+  drop_na() %>%
+  select(id, cityId, city, price, latitude, longitude)
+
+# Step 2: Calculate thresholds for price groups
+price_median <- median(geoData$price, na.rm = TRUE)
+price_sd <- sd(geoData$price, na.rm = TRUE)
+
+low_threshold <- price_median - 0.25 * price_sd
+high_threshold <- price_median + 0.25 * price_sd
+
+print(paste("Low Threshold:", low_threshold))
+print(price_median)
+print(paste("High Threshold:", high_threshold))
+
+# Step 3: Categorize price into groups
+geoData <- geoData %>%
+  mutate(
+    price_category = case_when(
+      price < low_threshold ~ "Low",
+      price >= low_threshold & price <= high_threshold ~ "Medium",
+      price > high_threshold ~ "High"
+    )
+  )
+
+# Check distribution of price categories to ensure all groups are present
+print(table(geoData$price_category))
+
+# Step 4: Function to evaluate clustering results
+evaluate_clustering <- function(data, clusters) {
+  # Summarize data by cluster
+  cluster_summary <- data %>%
+    filter(cluster != "Noise") %>%
+    group_by(cluster, price_category) %>%
+    summarize(
+      count = n(),
+      avg_price = median(price, na.rm = TRUE),
+      .groups = "drop"
+    )
+  
+  # Check if there are valid clusters
+  if (nrow(cluster_summary) == 0) {
+    warning("No valid clusters found. Skipping evaluation.")
+    return(list(summary = NULL, metrics = NULL, data = data))
+  }
+  
+  # Calculate additional metrics
+  cluster_metrics <- cluster_summary %>%
+    group_by(cluster) %>%
+    summarize(
+      total_count = sum(count),
+      majority_category = price_category[which.max(count)],
+      majority_count = max(count),
+      avg_price = median(avg_price, na.rm = TRUE),
+      .groups = "drop"
+    )
+  
+  return(list(summary = cluster_summary, metrics = cluster_metrics, data = data))
+}
+
+# Step 5: Iterative clustering
+eps_values <- seq(0.05, 0.5, by = 0.05)
+minPts_values <- c(3, 5, 10, 15)
+best_result <- NULL
+best_density <- -Inf
+
+for (eps in eps_values) {
+  for (minPts in minPts_values) {
+    # Perform DBSCAN clustering
+    coords <- geoData %>% select(latitude, longitude)
+    dbscan_result <- dbscan(coords, eps = eps, minPts = minPts)
+    
+    # Add clustering results to the dataset
+    geoData <- geoData %>%
+      mutate(cluster = dbscan_result$cluster) %>%
+      mutate(cluster = ifelse(cluster == 0, "Noise", as.character(cluster)))
+    
+    # Evaluate clustering
+    eval_results <- evaluate_clustering(geoData, geoData$cluster)
+    
+    # Skip iteration if no valid clusters were found
+    if (is.null(eval_results$summary)) {
+      next
+    }
+    
+    cluster_metrics <- eval_results$metrics
+    geoData <- eval_results$data
+    
+    # Check if all classifications (Low, Medium, High) are represented
+    cluster_counts <- cluster_metrics %>%
+      group_by(majority_category) %>%
+      summarize(cluster_count = n_distinct(cluster), .groups = "drop")
+    
+    print("Cluster Counts by Price Category:")
+    print(cluster_counts)
+    
+    if (all(c("Low", "Medium", "High") %in% cluster_counts$majority_category)) {
+      # Calculate density metric (e.g., proportion of majority category per cluster)
+      avg_density <- median(cluster_metrics$majority_count / cluster_metrics$total_count, na.rm = TRUE)
+      
+      # Save the best clustering result
+      if (avg_density > best_density) {
+        best_density <- avg_density
+        best_result <- list(
+          eps = eps,
+          minPts = minPts,
+          density = avg_density,
+          clustering = geoData,
+          metrics = cluster_metrics
+        )
+      }
+    }
+  }
+}
+
+# Step 6: Output and Visualization
+if (!is.null(best_result)) {
+  print(paste("Best eps:", best_result$eps))
+  print(paste("Best minPts:", best_result$minPts))
+  print(paste("Best density:", best_result$density))
+  print("Cluster Metrics:")
+  print(best_result$metrics)
+  
+  # Visualization of best clustering result
+  ggplot(best_result$clustering, aes(x = longitude, y = latitude, color = price_category)) +
+    geom_point(alpha = 0.4) +
+    scale_color_manual(
+      values = c("Low" = "blue", "Medium" = "green", "High" = "red")
+    ) +
+    labs(
+      title = paste(
+        "DBSCAN Clustering with Optimized Parameters \n (eps =", best_result$eps,
+        ", minPts =", best_result$minPts, ")"
+      ),
+      x = "Longitude",
+      y = "Latitude",
+      color = "Price Category"
+    ) +
+    theme_minimal()
+} else {
+  print("No valid clustering configuration found that satisfies all conditions.")
+}
+
+
+```
+
+```{r}
+
+# Convert cluster labels to numeric, marking noise as a separate cluster (-1)
+geoData_with_clusters <- best_result$clustering %>%
+  mutate(cluster = ifelse(cluster == "Noise", -1, as.numeric(as.character(cluster))))
+
+# Filter out noise for metrics related to specific categories
+geoData_no_noise <- geoData_with_clusters %>%
+  filter(cluster != -1)
+
+# Compute silhouette scores for clusters (excluding noise)
+coords <- geoData_no_noise %>% select(latitude, longitude)
+silhouette_scores <- silhouette(geoData_no_noise$cluster, dist(coords))
+
+# Add silhouette scores to the dataset
+geoData_no_noise <- geoData_no_noise %>%
+  mutate(silhouette_width = silhouette_scores[, "sil_width"])
+
+# Calculate metrics for all clusters
+total_clusters <- length(unique(geoData_no_noise$cluster))
+silhouette_avg <- mean(silhouette_scores[, "sil_width"], na.rm = TRUE)
+
+# Calculate counts for Low, Medium, High clusters
+cluster_metrics <- geoData_no_noise %>%
+  group_by(cluster) %>%
+  summarize(
+    majority_category = price_category[which.max(table(price_category))],
+    .groups = "drop"
+  )
+
+category_counts <- cluster_metrics %>%
+  count(majority_category)
+
+# Calculate silhouette scores for each category
+silhouette_by_category <- geoData_no_noise %>%
+  group_by(price_category) %>%
+  summarize(
+    avg_silhouette = mean(silhouette_width, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+# Output results
+cat("Performance Metrics for DBSCAN Clustering Model:\n")
+cat("-------------------------------------------------\n")
+cat("Total Number of Clusters (excluding noise):", total_clusters, "\n")
+cat("\nCluster Counts by Category:\n")
+print(category_counts)
+
+cat("\nAverage Silhouette Score (All Clusters):", silhouette_avg, "\n")
+cat("\nAverage Silhouette Score by Price Category:\n")
+print(silhouette_by_category)
+
+
+```
+
+
+
+```{r}
+
+high_clusters_city_name <- best_result$clustering %>%
+  filter(cluster %in% high_clusters$cluster) %>%
+  group_by(cluster, city) %>%
+  summarize(count = n(), avg_price = median(price, na.rm = TRUE), .groups = "drop") %>%
+  group_by(cluster) %>%
+  summarize(city = city[which.max(avg_price)], avg_price = max(avg_price), .groups = "drop") 
+
+print(paste("High Clusters City Name:"))
+print(high_clusters_city_name)
+
+
+```
+
+
+```{r}
+
+high_clusters_city_name <- high_clusters_city_name %>%
+  arrange(desc(avg_price))
+
+print(paste("High Clusters City Name (Ordered by Avg Price):"))
+print(high_clusters_city_name)
+
+
+```
+
+
+```{r}
+
+city_median_price <- dataCleaned %>%
+  group_by(city) %>%
+  summarize(median_price = median(price, na.rm = TRUE), .groups = "drop") %>%
+  arrange(desc(median_price)) %>%
+  head(25) 
+
+print(paste("City Median Price:"))
+print(city_median_price)
+
+```
+
+
+```{r}
+
+high_points <- best_result$clustering %>%
+  filter(price_category == "High") 
+
+ggplot(high_points, aes(x = longitude, y = latitude)) + geom_point(alpha = 0.4) + labs(title = "High Price Points", x = "Longitude", y = "Latitude") + theme_minimal() 
+
+
+```
+
+
+```{r}
+
+medium_points <- best_result$clustering %>%
+  filter(price_category == "Medium") 
+
+ggplot(medium_points, aes(x = longitude, y = latitude)) + geom_point(alpha = 0.4) + labs(title = "Medium Price Points", x = "Longitude", y = "Latitude") + theme_minimal() 
+
+```
+
+
+
+
+```{r}
+
+low_points <- best_result$clustering %>%
+  filter(price_category == "Low")
+
+ggplot(low_points, aes(x = longitude, y = latitude)) + geom_point(alpha = 0.4) + labs(title = "Low Price Points", x = "Longitude", y = "Latitude") + theme_minimal() 
+
+
+```
+
+
+
+```{r}
+
+# Step 1: Data Preparation
+geoData <- dataCleaned %>%
+  drop_na() %>%
+  select(id, cityId, city, price, latitude, longitude)
+
+# Step 2: Calculate thresholds for price groups
+price_median <- median(geoData$price, na.rm = TRUE)
+price_sd <- sd(geoData$price, na.rm = TRUE)
+
+low_threshold <- price_median - 0.25 * price_sd
+high_threshold <- price_median + 0.25 * price_sd
+
+# Print thresholds
+print(paste("Low Threshold:", low_threshold))
+print(paste("Price Median:", price_median))
+print(paste("High Threshold:", high_threshold))
+
+# Step 3: Categorize price into groups
+geoData <- geoData %>%
+  mutate(
+    price_category = case_when(
+      price < low_threshold ~ "Low",
+      price >= low_threshold & price <= high_threshold ~ "Medium",
+      price > high_threshold ~ "High"
+    )
+  )
+
+# Check distribution of price categories to ensure all groups are present
+print(table(geoData$price_category))
+
+# Step 4: Function to evaluate clustering results
+evaluate_clustering <- function(data, clusters) {
+  cluster_summary <- data %>%
+    group_by(cluster, price_category) %>%
+    summarize(
+      count = n(),
+      avg_price = median(price, na.rm = TRUE),
+      .groups = "drop"
+    )
+  
+  # Check if there are valid clusters
+  if (nrow(cluster_summary) == 0) {
+    warning("No valid clusters found. Skipping evaluation.")
+    return(list(summary = NULL, metrics = NULL, data = data))
+  }
+  
+  # Calculate additional metrics
+  cluster_metrics <- cluster_summary %>%
+    group_by(cluster) %>%
+    summarize(
+      total_count = sum(count),
+      majority_category = price_category[which.max(count)],
+      majority_count = max(count),
+      avg_price = median(avg_price, na.rm = TRUE),
+      .groups = "drop"
+    )
+  
+  return(list(summary = cluster_summary, metrics = cluster_metrics, data = data))
+}
+
+# Step 5: Iterative K-means Clustering
+k_values <- 2:100  # Possible values for number of clusters
+best_result <- NULL
+best_density <- -Inf
+
+for (k in k_values) {
+  # Perform K-means clustering
+  coords <- geoData %>% select(latitude, longitude)
+  set.seed(123)  # For reproducibility
+  kmeans_result <- kmeans(coords, centers = k, nstart = 10)
+  
+  # Add clustering results to the dataset
+  geoData <- geoData %>%
+    mutate(cluster = as.factor(kmeans_result$cluster))
+  
+  # Evaluate clustering
+  eval_results <- evaluate_clustering(geoData, geoData$cluster)
+  
+  # Skip iteration if no valid clusters were found
+  if (is.null(eval_results$summary)) {
+    next
+  }
+  
+  cluster_metrics <- eval_results$metrics
+  geoData <- eval_results$data
+  
+  # Check if all classifications (Low, Medium, High) are represented
+  cluster_counts <- cluster_metrics %>%
+    group_by(majority_category) %>%
+    summarize(cluster_count = n_distinct(cluster), .groups = "drop")
+  
+  print("Cluster Counts by Price Category:")
+  print(cluster_counts)
+  
+  if (all(c("Low", "Medium", "High") %in% cluster_counts$majority_category)) {
+    # Calculate density metric (e.g., proportion of majority category per cluster)
+    avg_density <- median(cluster_metrics$majority_count / cluster_metrics$total_count, na.rm = TRUE)
+    
+    # Save the best clustering result
+    if (avg_density > best_density) {
+      best_density <- avg_density
+      best_result <- list(
+        k = k,
+        density = avg_density,
+        clustering = geoData,
+        metrics = cluster_metrics
+      )
+    }
+  }
+}
+
+# Step 6: Output and Visualization
+if (!is.null(best_result)) {
+  print(paste("Best k:", best_result$k))
+  print(paste("Best density:", best_result$density))
+  print("Cluster Metrics:")
+  print(best_result$metrics)
+  
+  # Visualization of best clustering result
+  ggplot(best_result$clustering, aes(x = longitude, y = latitude, color = price_category)) +
+    geom_point(alpha = 0.4) +
+    scale_color_manual(
+      values = c("Low" = "blue", "Medium" = "green", "High" = "red")
+    ) +
+    labs(
+      title = paste(
+        "K-means Clustering with Optimized Parameters \n (k =", best_result$k, ")"
+      ),
+      x = "Longitude",
+      y = "Latitude",
+      color = "Price Category"
+    ) +
+    theme_minimal()
+} else {
+  print("No valid clustering configuration found that satisfies all conditions.")
+}
+
+
+```
+
+
+
+
+```{r}
+
+high_clusters <- best_result$metrics %>%
+  filter(majority_category == "High") %>%
+  arrange(desc(total_count)) %>%
+  head(7) 
+
+print(paste("High Clusters:"))
+print(high_clusters)
+
+```
+
+
+```{r}
+
+high_clusters_centroid <- best_result$clustering %>%
+  filter(cluster %in% high_clusters$cluster) %>%
+  group_by(cluster) %>%
+  summarize(
+    centroid_latitude = mean(latitude),
+    centroid_longitude = mean(longitude),
+    avg_price = median(price, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+print(paste("High Clusters Centroid:"))
+print(high_clusters_centroid)
+
+```
+
+
+
+```{r}
+
+high_clusters_centroid <- high_clusters_centroid %>%
+  arrange(desc(avg_price)) 
+
+print(paste("High Clusters Centroid (Ordered by Avg Price):"))
+print(high_clusters_centroid)
+
+```
+
+
+```{r}
+
+ggplot(best_result$clustering, aes(x = longitude, y = latitude, color = cluster)) +
+  geom_point(alpha = 0.4) +
+  scale_color_viridis_d() +
+  labs(
+    title = paste(
+      "K-means Clustering with Optimized Parameters \n (k =", best_result$k, ")"
+    ),
+    x = "Longitude",
+    y = "Latitude",
+    color = "Cluster"
+  ) +
+  theme_minimal() +
+  theme(legend.position = "none")
+```
+
+
+```{r}
+
+# Convert cluster labels to numeric if necessary
+clusters_numeric <- as.numeric(as.character(best_result$clustering$cluster))
+
+# Extract coordinates for distance calculations
+coords <- geoData %>% select(latitude, longitude)
+
+# Compute the silhouette scores
+silhouette_scores <- silhouette(clusters_numeric, dist(coords))
+
+# Add silhouette scores to the dataset
+geoData_with_silhouette <- geoData %>%
+  mutate(
+    cluster = clusters_numeric,
+    silhouette_width = silhouette_scores[, "sil_width"]
+  )
+
+# Calculate metrics for all clusters
+total_clusters <- length(unique(clusters_numeric))
+silhouette_avg <- mean(silhouette_scores[, "sil_width"], na.rm = TRUE)
+
+# Calculate counts for Low, Medium, High clusters
+cluster_metrics <- geoData_with_silhouette %>%
+  group_by(cluster) %>%
+  summarize(
+    majority_category = price_category[which.max(table(price_category))],
+    .groups = "drop"
+  )
+
+category_counts <- cluster_metrics %>%
+  count(majority_category)
+
+# Calculate silhouette scores for each category
+silhouette_by_category <- geoData_with_silhouette %>%
+  group_by(price_category) %>%
+  summarize(
+    avg_silhouette = mean(silhouette_width, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+# Output results
+cat("Performance Metrics for K-means Clustering Model:\n")
+cat("--------------------------------------------------\n")
+cat("Total Number of Clusters:", total_clusters, "\n")
+cat("\nCluster Counts by Category:\n")
+print(category_counts)
+
+cat("\nAverage Silhouette Score (All Clusters):", silhouette_avg, "\n")
+cat("\nAverage Silhouette Score by Price Category:\n")
+print(silhouette_by_category)
+
+
+```
+
+
+```{r}
+
+
+
+```
+
